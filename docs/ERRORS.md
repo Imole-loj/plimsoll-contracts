@@ -61,6 +61,10 @@ codes as literal numbers, so a renumbering fails CI.
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
 | 12 | | [`ImplausibleAmount`](#12-implausibleamount) | |
 | 13 | | [`TooManyReporters`](#13-toomanyreporters) | |
+| 14 | | [`UpgradeNotProposed`](#14-upgradenotproposed) | |
+| 15 | | [`UpgradeDelayNotElapsed`](#15-upgradedelaynotelapsed) | |
+| 16 | | [`DocUriTooShort`](#16-docuritooshort) | |
+| 17 | | [`InvalidMinDocUriLen`](#17-invalidmindocurilen) | |
 
 ## RegistryError
 
@@ -93,7 +97,8 @@ when several apply the caller sees the first:
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
 | `post_supply` | auth, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
-| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `DocUriTooShort`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `set_min_doc_uri_len` | auth, `InvalidMinDocUriLen` |
 
 ### 1 `NotAStellarAsset`
 
@@ -196,7 +201,9 @@ when several apply the caller sees the first:
 - **Cause:** `doc_uri` is empty or longer than 256 bytes.
 - **Remedy:** Point at the source document with a URI of 1 to 256 bytes. Use a
   stable, shorter link, or content-addressed storage such as `ipfs://...`. The
-  `doc_hash` is what proves the content, so the URI only has to find it.
+  `doc_hash` is what proves the content, so the URI only has to find it. A
+  non-empty URI can also be too *short*; that fails with
+  [`DocUriTooShort`](#16-docuritooshort) instead.
 
 ### 12 `ImplausibleAmount`
 
@@ -224,6 +231,43 @@ when several apply the caller sees the first:
   reporter needs a maintainer to revoke one of the four with
   `reporter-registry.revoke`. Their slot is reclaimed by the next
   `post_reserve` at that tier.
+
+### 14 `UpgradeNotProposed`
+
+- **Raised by:** `execute_upgrade`, `cancel_upgrade`.
+- **Cause:** No upgrade is pending. Either none was proposed, or it was
+  already executed or cancelled.
+- **Remedy:** Read `pending_upgrade()`. If it returns `None`, call
+  `propose_upgrade(wasm_hash)` and wait `UPGRADE_DELAY_LEDGERS` before trying
+  to execute.
+
+### 15 `UpgradeDelayNotElapsed`
+
+- **Raised by:** `execute_upgrade`.
+- **Cause:** The pending proposal's `executable_at_ledger` has not been
+  reached yet.
+- **Remedy:** Wait until the ledger sequence is at least
+  `pending_upgrade().executable_at_ledger` and try again. Do not re-propose:
+  that restarts the clock.
+
+### 16 `DocUriTooShort`
+
+- **Raised by:** `post_reserve`.
+- **Cause:** `doc_uri` is non-empty but shorter than `min_doc_uri_len()`
+  bytes. The setting defaults to 10, so values such as `x`, `-` or `todo` are
+  refused, while empty and over-long URIs raise `InvalidUri` instead.
+- **Remedy:** Post a real URI. If a genuinely short locator is appropriate for
+  your deployment, a maintainer can lower the limit with
+  `set_min_doc_uri_len(len)`; otherwise use a full, stable link of at least
+  `min_doc_uri_len()` bytes.
+
+### 17 `InvalidMinDocUriLen`
+
+- **Raised by:** `set_min_doc_uri_len(len)`.
+- **Cause:** `len` is 0 or greater than the 256-byte URI maximum, which would
+  either accept the empty string or make every possible URI invalid.
+- **Remedy:** Pick a limit between 1 and 256 bytes. The previous setting is
+  left unchanged when this error is raised.
 
 ## VaultError
 

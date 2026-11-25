@@ -125,14 +125,16 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | --- | --- |
 | `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
+| `Reporters` (persistent) | `set_reporter` (write), `revoke` (write) |
 
 **coverage-ledger**
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin`, `Registry` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `list_asset`, `post_supply`, `post_reserve` |
+| `Admin`, `Registry`, `MinDocUriLen` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `list_asset`, `post_supply`, `post_reserve`, `set_min_doc_uri_len` |
 | `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
 | `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered` (read) |
+| `Snapshot(Address, u32)`, `SnapshotLedgers(Address)` (persistent) | `post_supply` (write). `get_coverage_snapshot` reads without extending. |
 | `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered` (read) |
 
 **covered-vault**
@@ -185,6 +187,7 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `Reporters` | persistent | `Vec<Address>`: every address with a `Reporter` entry, in first-add order |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -197,11 +200,28 @@ Decides who may speak. Holds no money.
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `reporter_count()` | — | `u32` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+
+`reporter_count()` returns the number of addresses the registry currently
+holds a `ReporterInfo` for. `set_reporter` adds an address to the `Reporters`
+index the first time it is registered and leaves it there through role and
+name changes, so one address is never counted twice; `revoke` removes it. The
+count walks the index and skips any entry whose `ReporterInfo` no longer
+exists (for example a lapsed entry the host has dropped), so it never reports
+an address as an active reporter after its entry is gone. It is a read-only
+view: it does not extend any TTL. The index is what keeps the count O(n) in
+the number of reporters rather than a scan of persistent storage.
+
+A registry upgraded in place from a build that predates the index has no index
+entries, so `reporter_count` reads `0` until each existing reporter is written
+once with `set_reporter`. That call is an update: `added_at` and the role are
+kept. [RUNBOOK.md](RUNBOOK.md#4-time-locked-upgrade) has the one-time procedure;
+onboarding and revocation keep the index in step after it.
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
@@ -221,7 +241,10 @@ Records what was said, and answers coverage questions.
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
 | `Reporters(Address, Tier)` | persistent | `Vec<Address>`: the reporters with a `ReportBy` entry at that tier, in the order they first posted; at most `MAX_REPORTERS_PER_TIER = 4` |
+| `Snapshot(Address, u32)` | persistent | `SupplySnapshot`: a supply snapshot by the ledger it was computed at |
+| `SnapshotLedgers(Address)` | persistent | `Vec<u32>`: the ledger sequences with a `Snapshot` entry, oldest first; at most `MAX_SNAPSHOT_HISTORY = 32` |
 | `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
+| `MinDocUriLen` | instance | `u32`: shortest accepted `doc_uri`, in bytes (default 10) |
 
 Every reporter keeps their own figure. Two auditors' reports coexist, and a
 transcriber who posts a later `as_of` adds a fresher figure without erasing
@@ -262,9 +285,12 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
-| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `DocUriTooShort`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
+| `get_coverage_snapshot(sac, seq: u32)` | — | `Option<SupplySnapshot>` (the snapshot recorded for ledger `seq`, while it is inside the history window) | — | — |
+| `min_doc_uri_len()` | — | `u32` | — | — |
+| `set_min_doc_uri_len(len: u32)` | admin | `()` | `InvalidMinDocUriLen` (0 or > 256) | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
@@ -317,12 +343,30 @@ Rules:
   `None` if there is no supply snapshot or no qualifying report.
 - `is_covered` is true only if `coverage` is `Some`, both the supply snapshot
   and the report are no older than `max_age` seconds, and `bps >= min_bps`.
+- `doc_uri` must be between `min_doc_uri_len()` bytes and 256 bytes. The
+  minimum defaults to `DEFAULT_MIN_DOC_URI_LEN = 10`, which already refuses
+  the one-character placeholders ("x", "-") that a bare non-empty check
+  accepts; an admin changes it with `set_min_doc_uri_len(len)`, where `len`
+  must be 1 to 256. Empty and over-long URIs still fail with `InvalidUri`; a
+  non-empty URI below the minimum fails with `DocUriTooShort`. Because the
+  check runs after the tier and amount checks, an unauthorised caller never
+  learns the configured minimum.
+- `post_supply` also keeps the snapshot under `Snapshot(sac, ledger)`, and
+  records the sequence in `SnapshotLedgers(sac)`, so `get_coverage_snapshot`
+  can answer for one ledger without walking a list. The history is a ring of
+  at most `MAX_SNAPSHOT_HISTORY = 32` snapshots per asset: each new post drops
+  the oldest entry, which bounds the rent one asset can accumulate. Only the
+  ring window is on chain; the full series remains in `supply_posted` events.
+  `get_coverage_snapshot` returns `None` for a sequence the asset never posted
+  and for one the ring has already evicted, and it does not extend any TTL.
 
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
-`ImplausibleAmount = 12`, `TooManyReporters = 13`.
+`ImplausibleAmount = 12`, `TooManyReporters = 13`, `UpgradeNotProposed = 14`,
+`UpgradeDelayNotElapsed = 15`, `DocUriTooShort = 16`,
+`InvalidMinDocUriLen = 17`.
 Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledgererror).
 
 ### Upgrading a v0.1 deployment
