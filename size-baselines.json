@@ -1,0 +1,11 @@
+{
+  "_comment": "Last recorded size of each contract wasm, in bytes. scripts/check_wasm_growth.py warns (it never fails) when a build is more than tolerance_percent above these. coverage_ledger and reporter_registry are the measured sizes recorded in size-budgets.json (18017 and 6230 bytes); covered_vault is derived from its 5800-byte budget, which was set at the measured size plus about 20%. The upgrade fixtures compile their contract's lib.rs and match it. A deliberate size change should refresh this file in the same commit with `python3 scripts/check_wasm_growth.py --update`.",
+  "tolerance_percent": 5,
+  "baselines": {
+    "coverage_ledger": 18017,
+    "covered_vault": 4833,
+    "reporter_registry": 6230,
+    "upgrade_fixture_ledger": 18017,
+    "upgrade_fixture_registry": 6230
+  }
+}

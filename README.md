@@ -73,7 +73,9 @@ What each actor (admins, supply poster, reporters, issuers, anyone) can make
 the ledger say, what limits them and what an integrator should do about it is
 in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). Every admin operation
 (upgrades, moving admin to a multisig, onboarding and revoking reporters) is a
-tested, step-by-step procedure in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+tested, step-by-step procedure in [docs/RUNBOOK.md](docs/RUNBOOK.md). What the
+contract wasm files are made of, and the size budgets and growth warning CI
+enforces, is in [docs/wasm-size.md](docs/wasm-size.md).
 
 ### Why it is Stellar-specific
 

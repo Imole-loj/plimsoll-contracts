@@ -29,6 +29,11 @@ jobs:
         run: stellar contract build --locked
       - name: Check wasm size budgets
         run: python3 scripts/check_wasm_sizes.py
+      # Warns, never fails: a 5% jump over the recorded baseline deserves a
+      # sentence in review, not a red build. The hard ceiling is the budget
+      # step above. See docs/wasm-size.md.
+      - name: Warn on wasm growth over baseline
+        run: python3 scripts/check_wasm_growth.py
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
       - name: Test
