@@ -184,12 +184,15 @@ this is the indexer.
 
 | Function | What it does |
 | --- | --- |
-| `coverage-ledger.post_supply(poster, sac, amount, ledger, breakdown_hash)` | Replaces the single stored supply snapshot for `sac`. |
+| `coverage-ledger.post_supply(poster, sac, amount, ledger, breakdown_hash)` | Replaces the latest stored supply snapshot for `sac`, and appends it to the bounded history `get_coverage_snapshot` reads. |
 
 **What it can falsify:**
 
-- **The supply of every listed asset.** There is one snapshot per asset, and
-  any supply poster can replace it. The amount only has to be non-negative.
+- **The supply of every listed asset.** The latest snapshot per asset is what
+  `coverage` reads, and any supply poster can replace it. The amount only has
+  to be non-negative. The last `MAX_SNAPSHOT_HISTORY = 32` snapshots are also
+  kept per asset for `get_coverage_snapshot`, so a false figure stays readable
+  there until the ring evicts it, even once `coverage` has moved on.
 - **Zero supply makes any asset read as covered.** With `supply = 0`,
   `bps = u32::MAX`. Every `is_covered` with a fresh report then answers
   `true`, whatever the reserves, zero included. (No issue yet.)

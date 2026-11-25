@@ -14,6 +14,14 @@ use soroban_sdk::{
 };
 
 const MAX_URI_LEN: u32 = 256;
+/// Shortest `doc_uri` accepted until an admin changes it. Ten bytes already
+/// rules out the placeholder values ("x", "-", "todo") a caller might type to
+/// get past a bare non-empty check.
+pub const DEFAULT_MIN_DOC_URI_LEN: u32 = 10;
+/// Supply snapshots kept per asset for `get_coverage_snapshot`. The history is
+/// a fixed-size ring so its rent is bounded; at a five-minute posting cadence
+/// thirty-two entries cover about two and a half hours.
+pub const MAX_SNAPSHOT_HISTORY: u32 = 32;
 /// Longest SAC name: 12-char code + ':' + 56-char G-address.
 const MAX_SAC_NAME_LEN: usize = 69;
 const STRKEY_LEN: usize = 56;
@@ -37,6 +45,13 @@ enum DataKey {
     ReportBy(Address, Tier, Address),
     /// Reporters with a `ReportBy` entry at (sac, tier), in first-post order.
     Reporters(Address, Tier),
+    /// A supply snapshot by the ledger it was computed at: (sac, ledger).
+    Snapshot(Address, u32),
+    /// The ledger sequences with a `Snapshot` entry, oldest first. At most
+    /// `MAX_SNAPSHOT_HISTORY` of them.
+    SnapshotLedgers(Address),
+    /// Shortest accepted `doc_uri`, in bytes.
+    MinDocUriLen,
 }
 
 #[contracterror]
@@ -58,6 +73,8 @@ pub enum LedgerError {
     TooManyReporters = 13,
     UpgradeNotProposed = 14,
     UpgradeDelayNotElapsed = 15,
+    DocUriTooShort = 16,
+    InvalidMinDocUriLen = 17,
 }
 
 #[contractevent]
@@ -150,6 +167,16 @@ fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
+/// The shortest accepted `doc_uri`. A ledger upgraded in place from a version
+/// that predates this setting has no stored value, so fall back to the default
+/// rather than failing the first report to arrive.
+fn configured_min_uri_len(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDocUriLen)
+        .unwrap_or(DEFAULT_MIN_DOC_URI_LEN)
+}
+
 fn read_persistent<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
     env: &Env,
     key: &DataKey,
@@ -201,6 +228,11 @@ fn parse_sac_name(env: &Env, name: &String) -> Option<(String, Address)> {
 
 fn reporters(env: &Env, sac: &Address, tier: Tier) -> Vec<Address> {
     read_persistent(env, &DataKey::Reporters(sac.clone(), tier)).unwrap_or_else(|| Vec::new(env))
+}
+
+/// The ledger sequences with a `Snapshot` entry, oldest first.
+fn snapshot_ledgers(env: &Env, sac: &Address) -> Vec<u32> {
+    read_persistent(env, &DataKey::SnapshotLedgers(sac.clone())).unwrap_or_else(|| Vec::new(env))
 }
 
 /// Every stored report at `tier`: a not-yet-migrated v0.1 entry first, then
@@ -329,6 +361,9 @@ impl CoverageLedger {
     pub fn __constructor(env: Env, admin: Address, registry: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Registry, &registry);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDocUriLen, &DEFAULT_MIN_DOC_URI_LEN);
         bump_instance(&env);
     }
 
@@ -402,6 +437,21 @@ impl CoverageLedger {
             poster: poster.clone(),
         };
         write_persistent(&env, &key, &snapshot);
+        // Keep the snapshot by its ledger too, so `get_coverage_snapshot` can
+        // answer for one sequence without walking a list. The ring drops the
+        // oldest entry once the window is full, which bounds the rent a single
+        // asset can accumulate.
+        write_persistent(&env, &DataKey::Snapshot(sac.clone(), ledger), &snapshot);
+        let mut history = snapshot_ledgers(&env, &sac);
+        history.push_back(ledger);
+        while history.len() > MAX_SNAPSHOT_HISTORY {
+            if let Some(evicted) = history.pop_front() {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::Snapshot(sac.clone(), evicted));
+            }
+        }
+        write_persistent(&env, &DataKey::SnapshotLedgers(sac.clone()), &history);
         bump_instance(&env);
         SupplyPosted {
             sac,
@@ -441,6 +491,9 @@ impl CoverageLedger {
         }
         if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
             panic_with_error!(&env, LedgerError::InvalidUri);
+        }
+        if doc_uri.len() < configured_min_uri_len(&env) {
+            panic_with_error!(&env, LedgerError::DocUriTooShort);
         }
         let now = env.ledger().timestamp();
         if as_of > now {
@@ -517,6 +570,33 @@ impl CoverageLedger {
 
     pub fn get_supply(env: Env, sac: Address) -> Option<SupplySnapshot> {
         read_persistent(&env, &DataKey::Supply(sac))
+    }
+
+    /// The supply snapshot recorded for ledger `seq`, while it is still inside
+    /// the [`MAX_SNAPSHOT_HISTORY`] window. Returns `None` for a sequence this
+    /// asset never posted, and for one the ring has already evicted.
+    ///
+    /// Read-only: it does not extend the entry's TTL, so a caller sweeping old
+    /// sequences pays nothing but the read.
+    pub fn get_coverage_snapshot(env: Env, sac: Address, seq: u32) -> Option<SupplySnapshot> {
+        let key = DataKey::Snapshot(sac, seq);
+        env.storage().persistent().get(&key)
+    }
+
+    /// The shortest accepted `doc_uri`, in bytes.
+    pub fn min_doc_uri_len(env: Env) -> u32 {
+        configured_min_uri_len(&env)
+    }
+
+    /// Set the shortest accepted `doc_uri`, in bytes. Must be between 1 and the
+    /// 256-byte maximum.
+    pub fn set_min_doc_uri_len(env: Env, len: u32) {
+        admin(&env).require_auth();
+        if len == 0 || len > MAX_URI_LEN {
+            panic_with_error!(&env, LedgerError::InvalidMinDocUriLen);
+        }
+        env.storage().instance().set(&DataKey::MinDocUriLen, &len);
+        bump_instance(&env);
     }
 
     /// The freshest report at `tier` that still counts.

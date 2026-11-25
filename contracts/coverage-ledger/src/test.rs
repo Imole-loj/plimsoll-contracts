@@ -1680,3 +1680,190 @@ fn a_new_proposal_restarts_the_clock() {
         Err(Ok(LedgerError::UpgradeDelayNotElapsed.into()))
     );
 }
+
+// ---- snapshot history (#107) ----------------------------------------------
+
+#[test]
+fn get_coverage_snapshot_returns_each_posted_snapshot() {
+    let f = listed();
+    f.ledger.post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_supply(&f.poster, &f.sac, &(120 * UNIT), &995, &hash(&f.env, 2));
+
+
+    let first = f.ledger.get_coverage_snapshot(&f.sac, &990).unwrap();
+    assert_eq!(first.amount, 100 * UNIT);
+    assert_eq!(first.ledger, 990);
+    assert_eq!(first.timestamp, T0);
+    assert_eq!(first.breakdown_hash, hash(&f.env, 1));
+    assert_eq!(first.poster, f.poster);
+
+    let second = f.ledger.get_coverage_snapshot(&f.sac, &995).unwrap();
+    assert_eq!(second.amount, 120 * UNIT);
+    // The newest snapshot is still what `get_supply` answers with.
+    assert_eq!(f.ledger.get_supply(&f.sac).unwrap().amount, 120 * UNIT);
+}
+
+#[test]
+fn get_coverage_snapshot_is_none_for_an_unknown_sequence() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &991), None);
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &0), None);
+}
+
+#[test]
+fn get_coverage_snapshot_is_scoped_to_the_asset() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let other = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    f.ledger.list_asset(&other);
+
+    assert_eq!(f.ledger.get_coverage_snapshot(&other, &990), None);
+    assert!(f.ledger.get_coverage_snapshot(&f.sac, &990).is_some());
+}
+
+#[test]
+fn snapshot_history_keeps_only_the_newest_window() {
+    let f = listed();
+    f.env.ledger().set_sequence_number(10_000);
+    let oldest = 9_000u32;
+    for i in 0..MAX_SNAPSHOT_HISTORY {
+        f.ledger.post_supply(
+            &f.poster,
+            &f.sac,
+            &((100 + i as i128) * UNIT),
+            &(oldest + i),
+            &hash(&f.env, 1),
+        );
+    }
+    assert!(f.ledger.get_coverage_snapshot(&f.sac, &oldest).is_some());
+
+    // One more post fills the ring past its window and evicts `oldest` only.
+    let newest = oldest + MAX_SNAPSHOT_HISTORY;
+    f.ledger.post_supply(
+        &f.poster,
+        &f.sac,
+        &(500 * UNIT),
+        &newest,
+        &hash(&f.env, 2),
+    );
+
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &oldest), None);
+    assert!(f
+        .ledger
+        .get_coverage_snapshot(&f.sac, &(oldest + 1))
+        .is_some());
+    let newest_snapshot = f.ledger.get_coverage_snapshot(&f.sac, &newest).unwrap();
+    assert_eq!(newest_snapshot.amount, 500 * UNIT);
+}
+
+// ---- doc_uri length (#128) ------------------------------------------------
+
+fn uri_of(env: &Env, s: &str) -> String {
+    String::from_str(env, s)
+}
+
+#[test]
+fn min_doc_uri_len_defaults_to_ten() {
+    let f = setup();
+    assert_eq!(f.ledger.min_doc_uri_len(), DEFAULT_MIN_DOC_URI_LEN);
+}
+
+#[test]
+fn report_rejects_a_uri_shorter_than_the_minimum() {
+    let f = listed();
+    // Nine bytes: one short of the default ten.
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri_of(&f.env, "ipfs://xy"),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::DocUriTooShort.into())));
+}
+
+#[test]
+fn report_accepts_a_uri_exactly_at_the_minimum() {
+    let f = listed();
+    // Ten bytes, the shortest URI the default accepts.
+    f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri_of(&f.env, "ipfs://abc"),
+    );
+    let report = f.ledger.get_report(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(report.doc_uri, uri_of(&f.env, "ipfs://abc"));
+}
+
+#[test]
+fn admin_can_lower_the_minimum_doc_uri_len() {
+    let f = listed();
+    f.ledger.set_min_doc_uri_len(&4);
+    assert_eq!(f.ledger.min_doc_uri_len(), 4);
+
+    f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri_of(&f.env, "doc!"),
+    );
+    let report = f.ledger.get_report(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(report.doc_uri, uri_of(&f.env, "doc!"));
+}
+
+#[test]
+fn admin_can_raise_the_minimum_doc_uri_len() {
+    let f = listed();
+    f.ledger.set_min_doc_uri_len(&50);
+    assert_eq!(f.ledger.min_doc_uri_len(), 50);
+
+    // `uri(&f.env)` is 44 bytes, long enough before the raise and too short now.
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::DocUriTooShort.into())));
+}
+
+#[test]
+fn set_min_doc_uri_len_rejects_zero() {
+    let f = setup();
+    assert_eq!(
+        f.ledger.try_set_min_doc_uri_len(&0),
+        Err(Ok(LedgerError::InvalidMinDocUriLen.into()))
+    );
+    assert_eq!(f.ledger.min_doc_uri_len(), DEFAULT_MIN_DOC_URI_LEN);
+}
+
+#[test]
+fn set_min_doc_uri_len_rejects_more_than_the_uri_maximum() {
+    let f = setup();
+    assert_eq!(
+        f.ledger.try_set_min_doc_uri_len(&257),
+        Err(Ok(LedgerError::InvalidMinDocUriLen.into()))
+    );
+    assert_eq!(f.ledger.min_doc_uri_len(), DEFAULT_MIN_DOC_URI_LEN);
+}
+
+#[test]
+fn set_min_doc_uri_len_requires_the_admin() {
+    let f = setup();
+    f.env.mock_auths(&[]);
+    let res = f.ledger.try_set_min_doc_uri_len(&12);
+    assert!(res.is_err());
+    assert_eq!(f.ledger.min_doc_uri_len(), DEFAULT_MIN_DOC_URI_LEN);
+}
