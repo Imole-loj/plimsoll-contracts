@@ -403,6 +403,24 @@ proposal so integrators can review the wasm in the window.
 
    Expected: `$HASH`, then `null`. Then run section 6.
 
+9. **If this was the registry's first upgrade to a build with the reporter
+   index, rebuild it.** `reporter_count` counts the `Reporters` index, which
+   the new code fills in `set_reporter`; a build that predates it never wrote
+   one, so the index starts empty even though every reporter keeps their role.
+   Re-run `set_reporter` once for each existing reporter, with the role and
+   name they already have. It is an update, so `added_at` and the role are
+   unchanged, and it publishes `reporter_set`.
+
+   ```bash
+   stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
+     set_reporter --reporter "$REPORTER" --role 1 --name "Example Auditor"
+   stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" --send=no -- reporter_count
+   ```
+
+   Expected: the full number of active reporters once every address has been
+   re-set, and `0` before that. Onboarding and revocation keep the index in
+   step from then on, so this is a one-time step.
+
 ## 5. Cancel or roll back an upgrade
 
 **Cancel a pending proposal** (before it is executed):

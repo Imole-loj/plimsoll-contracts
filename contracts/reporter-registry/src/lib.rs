@@ -8,7 +8,7 @@ use plimsoll_types::{
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    BytesN, ContractExecutable, Env, String,
+    BytesN, ContractExecutable, Env, String, Vec,
 };
 
 const MAX_NAME_LEN: u32 = 64;
@@ -18,6 +18,8 @@ const MAX_NAME_LEN: u32 = 64;
 enum DataKey {
     Admin,
     Reporter(Address),
+    /// Every address with a `Reporter` entry, in the order it was first added.
+    Reporters,
     PendingUpgrade,
 }
 
@@ -92,6 +94,15 @@ fn bump_instance(env: &Env) {
         .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
 }
 
+/// Every address with a `Reporter` entry, in first-add order. The index keeps
+/// `reporter_count` a walk over the addresses rather than a scan of storage.
+fn reporter_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Reporters)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
 fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
@@ -129,6 +140,17 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        // Index the address once: a role or name change updates the entry in
+        // place and must not make `reporter_count` see it twice.
+        let index_key = DataKey::Reporters;
+        let mut index = reporter_index(&env);
+        if !index.contains(&reporter) {
+            index.push_back(reporter.clone());
+            env.storage().persistent().set(&index_key, &index);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
         bump_instance(&env);
         ReporterSet {
             reporter,
@@ -145,12 +167,52 @@ impl ReporterRegistry {
             panic_with_error!(&env, RegistryError::ReporterNotFound);
         }
         env.storage().persistent().remove(&key);
+        let index_key = DataKey::Reporters;
+        let mut index = reporter_index(&env);
+        let mut position = None;
+        for (i, who) in index.iter().enumerate() {
+            if who == reporter {
+                position = Some(i as u32);
+                break;
+            }
+        }
+        if let Some(i) = position {
+            // `i` came from the walk above, so the removal always succeeds.
+            let _ = index.remove(i);
+            if index.is_empty() {
+                env.storage().persistent().remove(&index_key);
+            } else {
+                env.storage().persistent().set(&index_key, &index);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&index_key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+            }
+        }
         bump_instance(&env);
         ReporterRevoked { reporter }.publish(&env);
     }
 
     pub fn role_of(env: Env, reporter: Address) -> Option<Role> {
         Self::get_reporter(env, reporter).map(|info| info.role)
+    }
+
+    /// How many reporters the registry currently holds.
+    ///
+    /// Counts only entries that still exist: `revoke` removes an address from
+    /// the index as well as its `ReporterInfo`, so a revoked reporter is never
+    /// counted, and an index entry whose info is gone (a lapsed entry the host
+    /// has since dropped) is skipped rather than counted. The walk is read-only
+    /// and does not extend any TTL.
+    pub fn reporter_count(env: Env) -> u32 {
+        let index = reporter_index(&env);
+        let mut count = 0u32;
+        for reporter in index.iter() {
+            let key = DataKey::Reporter(reporter);
+            if env.storage().persistent().has(&key) {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn get_reporter(env: Env, reporter: Address) -> Option<ReporterInfo> {

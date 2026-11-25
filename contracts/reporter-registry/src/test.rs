@@ -210,3 +210,83 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert!(res.is_err());
     assert_eq!(client.admin(), admin);
 }
+
+// ---- reporter_count (#119) ------------------------------------------------
+
+#[test]
+fn reporter_count_is_zero_on_a_fresh_registry() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.reporter_count(), 0);
+}
+
+#[test]
+fn reporter_count_counts_every_active_reporter() {
+    let (env, _admin, client) = setup();
+    for role in [Role::Auditor, Role::Transcriber, Role::SupplyPoster] {
+        client.set_reporter(
+            &Address::generate(&env),
+            &role,
+            &String::from_str(&env, "who"),
+        );
+    }
+    assert_eq!(client.reporter_count(), 3);
+}
+
+#[test]
+fn reporter_count_does_not_count_a_role_change_twice() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "vol"));
+    client.set_reporter(
+        &who,
+        &Role::Auditor,
+        &String::from_str(&env, "vol, now audit"),
+    );
+    assert_eq!(client.reporter_count(), 1);
+}
+
+#[test]
+fn reporter_count_drops_a_revoked_reporter() {
+    let (env, _admin, client) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.set_reporter(&first, &Role::Auditor, &String::from_str(&env, "a"));
+    client.set_reporter(&second, &Role::Auditor, &String::from_str(&env, "b"));
+    assert_eq!(client.reporter_count(), 2);
+
+    client.revoke(&first);
+    assert_eq!(client.reporter_count(), 1);
+    client.revoke(&second);
+    assert_eq!(client.reporter_count(), 0);
+}
+
+#[test]
+fn reporter_count_counts_a_readded_reporter() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+    client.revoke(&who);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "back"));
+    assert_eq!(client.reporter_count(), 1);
+    assert_eq!(client.role_of(&who), Some(Role::Transcriber));
+}
+
+/// A `ReporterInfo` can go without `revoke` being called: if its TTL lapses and
+/// nothing restores it, the entry is gone while the index still names it. The
+/// count follows entries that exist, not index entries.
+#[test]
+fn reporter_count_skips_an_index_entry_whose_info_is_gone() {
+    let (env, _admin, client) = setup();
+    let live = Address::generate(&env);
+    let lapsed = Address::generate(&env);
+    client.set_reporter(&live, &Role::Auditor, &String::from_str(&env, "live"));
+    client.set_reporter(&lapsed, &Role::Auditor, &String::from_str(&env, "lapsed"));
+
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Reporter(lapsed.clone()));
+
+    assert_eq!(client.reporter_count(), 1);
+    assert_eq!(client.role_of(&lapsed), None);
+    assert_eq!(client.role_of(&live), Some(Role::Auditor));
+}
