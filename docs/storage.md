@@ -43,6 +43,7 @@ Assuming a 5-second ledger close time (`DAY_IN_LEDGERS = 17_280`):
 | `Report(Address, Tier)` | `persistent` | `ReserveReport` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | Legacy v0.1 key (never written). Extended on read via `reports_at` (`get_report`, `get_reports`, `get_all_reports`, `coverage`, `is_covered`); removed by `migrate_legacy` on first `post_reserve` at that tier |
 | `ReportBy(Address, Tier, Address)` | `persistent` | `ReserveReport` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | `post_reserve` (write & stale check read), `migrate_legacy` (write), `reports_at` (read in `get_report`, `get_reports`, `get_all_reports`, `coverage`, `is_covered`); removed by `reclaim_slots` when tier is full and reporter no longer counts |
 | `Reporters(Address, Tier)` | `persistent` | `Vec<Address>` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | `post_reserve` (write & read), `migrate_legacy` (write), `reports_at` (read) |
+| `MinDocUriLen` | `instance` | `u32` | `INSTANCE_THRESHOLD` (`518_400`) → `INSTANCE_EXTEND_TO` (`1_555_200`) | `set_min_doc_uri_len` (write); `min_doc_uri_len` reads it without extending. Absent means `DEFAULT_MIN_DOC_URI_LEN = 10` |
 
 ---
 
@@ -51,7 +52,8 @@ Assuming a 5-second ledger close time (`DAY_IN_LEDGERS = 17_280`):
 | `DataKey` variant | Tier | Value type | Bump amount (`threshold` → `extend_to`) | Extended by |
 | --- | --- | --- | --- | --- |
 | `Admin` | `instance` | `Address` | `INSTANCE_THRESHOLD` (`518_400`) → `INSTANCE_EXTEND_TO` (`1_555_200`) | `__constructor`, `set_reporter`, `revoke`, `transfer_admin`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade`, `pending_upgrade` (if `Some`) |
-| `Reporter(Address)` | `persistent` | `ReporterInfo` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | `set_reporter` (write), `get_reporter` & `role_of` (read when `Some`); removed on `revoke` |
+| `Reporter(Address)` | `persistent` | `ReporterInfo` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | `set_reporter` (write), `get_reporter` & `role_of` (read when `Some`), `reporter_count` (existence check, no extension); removed on `revoke` |
+| `Reporters` | `persistent` | `Vec<Address>` | `PERSISTENT_THRESHOLD` (`518_400`) → `PERSISTENT_EXTEND_TO` (`1_555_200`) | `set_reporter` & `revoke` (write), `reporter_count` (read); removed when the last reporter is revoked |
 | `PendingUpgrade` | `instance` | `PendingUpgrade` | `INSTANCE_THRESHOLD` (`518_400`) → `INSTANCE_EXTEND_TO` (`1_555_200`) | Shares `instance()` TTL (`propose_upgrade`, `execute_upgrade` / `cancel_upgrade` remove it, `pending_upgrade` bumps when `Some`) |
 
 ---
