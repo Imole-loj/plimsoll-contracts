@@ -2338,6 +2338,32 @@ fn pause_sets_the_flag_and_emits_the_admin() {
 }
 
 #[test]
+fn is_covered_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert_within_budget(
+        &f,
+        "is_covered",
+        IS_COVERED_MAX_CPU_INSTRUCTIONS,
+        IS_COVERED_MAX_MEMORY_BYTES,
+        || {
+            assert!(f
+                .ledger
+                .is_covered(&f.sac, &10_000, &86_400, &Tier::Transcribed));
+        },
+    );
+}
+
+#[test]
 fn unpause_clears_the_flag_and_emits_the_admin() {
     let f = listed();
     f.ledger.pause();
@@ -2353,6 +2379,21 @@ fn unpause_clears_the_flag_and_emits_the_admin() {
     assert_eq!(
         Address::try_from_val(&f.env, &data.get(Symbol::new(&f.env, "by")).unwrap()).unwrap(),
         f.admin
+    );
+}
+
+#[test]
+fn post_supply_stays_within_its_resource_budget() {
+    let f = listed();
+    assert_within_budget(
+        &f,
+        "post_supply",
+        POST_SUPPLY_MAX_CPU_INSTRUCTIONS,
+        POST_SUPPLY_MAX_MEMORY_BYTES,
+        || {
+            f.ledger
+                .post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 1));
+        },
     );
 }
 
@@ -2637,6 +2678,29 @@ fn enable_native_supply_requires_a_listed_asset() {
     assert_eq!(
         f.ledger.try_enable_native_supply(&f.sac, &f.sac),
         Err(Ok(LedgerError::AssetNotListed.into()))
+    );
+}
+
+#[test]
+fn post_report_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    assert_within_budget(
+        &f,
+        "post_reserve",
+        POST_RESERVE_MAX_CPU_INSTRUCTIONS,
+        POST_RESERVE_MAX_MEMORY_BYTES,
+        || {
+            f.ledger.post_reserve(
+                &f.auditor,
+                &f.sac,
+                &(100 * UNIT),
+                &T0,
+                &hash(&f.env, 2),
+                &uri(&f.env),
+            );
+        },
     );
 }
 

@@ -30,6 +30,13 @@ pub const MAX_SUPPLY_LEDGER_AGE: u32 = 720;
 /// Most asset-reporter pairs one `asset_reporter_pairs` call returns.
 pub const MAX_PAIRS_PER_CALL: u32 = 50;
 
+/// Maximum number of live reports returned by [`CoverageLedger::get_all_reports`].
+pub const MAX_ALL_REPORTS: u32 = 20;
+
+/// Maximum report age in seconds (90 days, matching the persistent TTL window)
+/// for [`CoverageLedger::get_all_reports`] to treat a report as non-expired.
+pub const MAX_REPORT_AGE_SECS: u64 = 90 * 86_400;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -880,81 +887,20 @@ impl CoverageLedger {
         out
     }
 
-    /// When `reporter` most recently posted a reserve figure for `asset`: the
-    /// ledger timestamp of that post (`posted_at`), not the figure's `as_of`.
-    ///
-    /// Every tier is searched, so a reporter whose role changed answers with
-    /// whichever of their posts is later, and a not-yet-migrated v0.1 entry
-    /// counts as one of their posts too. The registry is not consulted: a
-    /// revoked reporter's posts remain history, and `get_reports` already says
-    /// which of them still count. `None` when `reporter` has never posted for
-    /// `asset`.
-    pub fn reporter_last_post(env: Env, reporter: Address, asset: Address) -> Option<u64> {
-        let mut last: Option<u64> = None;
-        let mut note = |posted_at: u64| {
-            if last.is_none_or(|seen| posted_at > seen) {
-                last = Some(posted_at);
-            }
-        };
-        for tier in Tier::ALL_DESC {
-            if let Some(legacy) =
-                read_persistent::<ReserveReport>(&env, &DataKey::Report(asset.clone(), tier))
-            {
-                if legacy.reporter == reporter {
-                    note(legacy.posted_at);
-                }
-            }
-            if let Some(report) = read_persistent::<ReserveReport>(
-                &env,
-                &DataKey::ReportBy(asset.clone(), tier, reporter.clone()),
-            ) {
-                note(report.posted_at);
-            }
-        }
-        last
-    }
-
-    /// A page of the (asset, reporter) pairs the ledger holds figures for, so
-    /// an indexer can bootstrap its dataset without walking every asset.
-    ///
-    /// Pairs come from the stored per-tier reporter indexes, so no registry
-    /// call is made: a reporter whose figure no longer counts still appears,
-    /// and `get_reports` / `reporter_last_post` say what they posted. A
-    /// reporter with an entry at more than one tier appears once per asset.
-    ///
-    /// Order: assets in listing order, and within an asset the tiers strongest
-    /// first (`AuditorSigned`, `IssuerSigned`, `Transcribed`), first-post
-    /// order within a tier. `cursor` is the index of the first pair to return
-    /// and defaults to `0`; `limit` is capped at `MAX_PAIRS_PER_CALL = 50`.
-    /// An empty page means the cursor is at or past the last pair. Listings
-    /// and first posts only ever grow the sequence, so a bootstrap that must
-    /// be exact should re-read from `0` or dedupe by pair.
-    pub fn asset_reporter_pairs(
-        env: Env,
-        cursor: Option<u32>,
-        limit: u32,
-    ) -> Vec<(Address, Address)> {
-        let start = cursor.unwrap_or(0);
-        let page = limit.min(MAX_PAIRS_PER_CALL);
+    /// All live (non-expired and still counting) reports for `sac`, sorted by
+    /// tier descending (`AuditorSigned`, `IssuerSigned`, `Transcribed`), capped
+    /// at [`MAX_ALL_REPORTS`].
+    pub fn get_all_reports(env: Env, sac: Address) -> Vec<ReserveReport> {
+        let registry = RegistryClient::new(&env, &registry(&env));
+        let now = env.ledger().timestamp();
         let mut out = Vec::new(&env);
-        if page == 0 {
-            return out;
-        }
-        let mut index = 0u32;
-        for asset in assets(&env).iter() {
-            let mut reported = Vec::new(&env);
-            for tier in Tier::ALL_DESC {
-                for reporter in reporters(&env, &asset, tier).iter() {
-                    if reported.contains(&reporter) {
-                        continue;
-                    }
-                    reported.push_back(reporter.clone());
-                    if index < start {
-                        index += 1;
-                        continue;
-                    }
-                    out.push_back((asset.clone(), reporter));
-                    if out.len() == page {
+        for tier in Tier::ALL_DESC {
+            for report in reports_at(&env, &sac, tier).iter() {
+                if now.saturating_sub(report.as_of) <= MAX_REPORT_AGE_SECS
+                    && counts(&registry, &report)
+                {
+                    out.push_back(report);
+                    if out.len() >= MAX_ALL_REPORTS {
                         return out;
                     }
                 }
